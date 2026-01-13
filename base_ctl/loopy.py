@@ -4,21 +4,17 @@
 """
 pid_go_to_goal_and_log.py
 
-ROS2 node:
-- Sub:  /odom (nav_msgs/Odometry)  -> read x,y,yaw
-- Pub:  /cmd_vel (geometry_msgs/Twist) -> send vx, vy, wz (for omni base)
-- Pub:  /pid_path (nav_msgs/Path) -> visualize trajectory in RViz
-- Log:  write trajectory to CSV (time,x,y,yaw,cmd_vx,cmd_vy,cmd_wz)
+你原来的“动作/控制逻辑”保持不变：
+- world误差 -> body误差
+- PID
+- slow_dist 缩放
+- clamp
+- 到点判断 (pos_tol + yaw_tol)
 
-Usage:
-  ros2 run <your_pkg> pid_go_to_goal_and_log.py --ros-args \
-    -p odom_topic:=/rko_lio/odometry -p cmd_topic:=/cmd_vel \
-    -p goal_x:=1.0 -p goal_y:=0.0 -p goal_yaw:=0.0 \
-    -p out_csv:=/tmp/traj.csv
-
-Or run directly:
-  python3 pid_go_to_goal_and_log.py --ros-args -p goal_x:=1.0 -p goal_y:=0.0
+我只做“外层动作编排”（不碰你的控制律）：
+- 固定动作序列：先到 (1,1,0) -> 到点停 2 秒 -> 再回 (0,0,0) -> 到点停 2 秒 -> 退出
 """
+
 import time
 import math
 import csv
@@ -27,11 +23,9 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.time import Time
 
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import Twist, PoseStamped
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import Twist, PoseStamped, TwistStamped
 
 
 def wrap_to_pi(a: float) -> float:
@@ -84,12 +78,14 @@ class PID:
         return self.g.kp * e + self.g.ki * self.i + self.g.kd * de
 
 
-
 class PIDGoToGoal(Node):
     def __init__(self):
         super().__init__("pid_go_to_goal_and_log")
         odom_topic_name = "/rko_lio/odometry"
-        # Params
+
+        # =========================
+        # 原始 Params（保持不变）
+        # =========================
         self.declare_parameter("odom_topic", odom_topic_name)
         self.declare_parameter("cmd_topic", "/cmd_vel")
         self.declare_parameter("path_topic", "/pid_path")
@@ -102,26 +98,26 @@ class PIDGoToGoal(Node):
         self.declare_parameter("yaw_tol", 0.08)     # rad
         self.declare_parameter("slow_dist", 0.01)   # m (within this, scale down vx/vy)
 
-        # speed limits (body frame)
-        self.declare_parameter("vx_max", 0.5)      # m/s
-        self.declare_parameter("vy_max", 0.5)      # m/s
-        self.declare_parameter("wz_max", 2.0)       # rad/s (increased for faster rotation)
+        self.declare_parameter("vx_max", 0.5)       # m/s
+        self.declare_parameter("vy_max", 0.5)       # m/s
+        self.declare_parameter("wz_max", 2.0)       # rad/s
 
-        # PID gains (start conservative; tune later)
-        self.declare_parameter("kp_xy", 3) #1.2
+        self.declare_parameter("kp_xy", 3)
         self.declare_parameter("ki_xy", 0.0)
         self.declare_parameter("kd_xy", 0.1)
         self.declare_parameter("imax_xy", 0.3)
 
-        self.declare_parameter("kp_yaw", 2.0) 
+        self.declare_parameter("kp_yaw", 2.0)
         self.declare_parameter("ki_yaw", 0.0)
-        self.declare_parameter("kd_yaw", 0.15) #0.2
+        self.declare_parameter("kd_yaw", 0.15)
         self.declare_parameter("imax_yaw", 0.5)
 
-        # logging
         self.declare_parameter("out_csv", "/opt/project/robot_base_ctl/pid_traj.csv")
-        self.declare_parameter("log_every_n", 1)  # log every N control ticks
+        self.declare_parameter("log_every_n", 1)
 
+        # =========================
+        # 读取原始参数（保持不变）
+        # =========================
         self.odom_topic = self.get_parameter("odom_topic").value
         self.cmd_topic = self.get_parameter("cmd_topic").value
         self.path_topic = self.get_parameter("path_topic").value
@@ -168,14 +164,14 @@ class PIDGoToGoal(Node):
         self.sub = self.create_subscription(Odometry, self.odom_topic, self.cb_odom, 50)
         self.pub_cmd = self.create_publisher(Twist, self.cmd_topic, 10)
         self.pub_path = self.create_publisher(Path, self.path_topic, 10)
+
         self.fb_vx = 0.0
         self.fb_vy = 0.0
-        self.sub_fb = self.create_subscription(
-            TwistStamped, "/base_vel_fb", self.cb_fb, 10
-        )
+        self.sub_fb = self.create_subscription(TwistStamped, "/base_vel_fb", self.cb_fb, 10)
+
         # Path msg
         self.path = Path()
-        self.path.header.frame_id = "odom"  # will update to match odom.header.frame_id if possible
+        self.path.header.frame_id = "odom"
 
         # CSV
         self.out_csv = self.get_parameter("out_csv").value
@@ -185,13 +181,28 @@ class PIDGoToGoal(Node):
         self._csv = csv.writer(self._csv_file)
         self._csv.writerow(["t_sec","x","y","yaw","err_x","err_y","err_yaw","cmd_vx","cmd_vy","cmd_wz","fb_vx","fb_vy"])
 
+        # ============================================================
+        # 外层动作编排（新增）：(1,1,0) -> 停2秒 -> (0,0,0) -> 停2秒 -> 退出
+        # 只负责在“到点”那一刻切换 goal，不改你的控制律
+        # ============================================================
+        self.waypoints = [(1.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+        self.wp_idx = 0
+
+        self.hold_sec = 2.0
+        self.hold_until_t = 0.0  # now < hold_until_t => 强制stop
+
+        self.finish_and_exit = False  # 最后一个点完成后退出
+
+        # 启动就把 goal 设成第一个动作点（覆盖你命令行的 goal）
+        self.goal_x, self.goal_y, self.goal_yaw = self.waypoints[self.wp_idx]
 
         # Timer control loop
         self.timer = self.create_timer(self.dt, self.control_loop)
 
         self.get_logger().info(
             f"PID go-to-goal running. goal=({self.goal_x:.3f},{self.goal_y:.3f}, yaw={self.goal_yaw:.3f}rad) "
-            f"odom={self.odom_topic} cmd={self.cmd_topic} csv={self.out_csv}"
+            f"odom={self.odom_topic} cmd={self.cmd_topic} csv={self.out_csv} "
+            f"| sequence={self.waypoints} hold_sec={self.hold_sec}"
         )
 
     def destroy_node(self):
@@ -205,39 +216,33 @@ class PIDGoToGoal(Node):
         except Exception:
             pass
         super().destroy_node()
-    
+
     def cb_fb(self, msg: TwistStamped):
         self.fb_vx = float(msg.twist.linear.x)
         self.fb_vy = float(msg.twist.linear.y)
 
     def cb_odom(self, msg: Odometry):
         self.have_odom = True
-        # Coordinate transformation: odom_x = robot_(-y), odom_y = robot_x
-        # So: robot_x = odom_y, robot_y = -odom_x
+
         odom_x = float(msg.pose.pose.position.x)
         odom_y = float(msg.pose.pose.position.y)
-        # self.x = odom_y   # robot x = odom y
-        # self.y = -odom_x  # robot y = -odom x
-        
+
+        # 你的坐标选择（保持不变）
         self.x = odom_x
         self.y = odom_y
-        # TODO enable later 
+
         q = msg.pose.pose.orientation
         self.yaw = yaw_from_quat(q.x, q.y, q.z, q.w)
-        # self.yaw = 0
 
-        # Keep path frame consistent with odom
         if msg.header.frame_id:
             self.path.header.frame_id = msg.header.frame_id
 
-        # Append pose to path for RViz
         ps = PoseStamped()
         ps.header = msg.header
         ps.pose = msg.pose.pose
         self.path.header.stamp = msg.header.stamp
         self.path.poses.append(ps)
 
-        # Avoid unlimited growth (keep last N points)
         if len(self.path.poses) > 5000:
             self.path.poses = self.path.poses[-5000:]
 
@@ -247,54 +252,88 @@ class PIDGoToGoal(Node):
         tw = Twist()
         self.pub_cmd.publish(tw)
 
+    # ====== 外层动作编排：时间与切点（新增）======
+    def now_sec(self) -> float:
+        return self.get_clock().now().nanoseconds * 1e-9
+
+    def advance_waypoint(self):
+        """到点后调用：切换下一个目标点（不改控制律），并 reset PID。"""
+        self.wp_idx += 1
+
+        if self.wp_idx >= len(self.waypoints):
+            if self.finish_and_exit:
+                self.get_logger().info("Finished all waypoints. Exiting (shutdown).")
+                rclpy.shutdown()
+            else:
+                self.wp_idx = 0  # 如果你想循环就保留这个
+                # self.get_logger().info("Looping waypoints.")
+
+        if self.wp_idx < len(self.waypoints):
+            self.goal_x, self.goal_y, self.goal_yaw = self.waypoints[self.wp_idx]
+            self.pid_x.reset()
+            self.pid_y.reset()
+            self.pid_yaw.reset()
+            self.get_logger().info(
+                f"Next goal: ({self.goal_x:.3f},{self.goal_y:.3f},{self.goal_yaw:.3f}) idx={self.wp_idx}"
+            )
+
     def control_loop(self):
         if not self.have_odom:
             return
 
-        # world-frame position error
+        # ====== 外层动作编排：hold阶段强制停（新增）======
+        now_t = self.now_sec()
+        if now_t < self.hold_until_t:
+            self.stop_robot()   # 每一帧都发0，确保真停
+            return
+
+        # =========================
+        # 下面开始：你的原动作逻辑（保持不变）
+        # =========================
+
         dx = self.goal_x - self.x
         dy = self.goal_y - self.y
         dist = math.hypot(dx, dy)
 
-        # yaw error
         eyaw = wrap_to_pi(self.goal_yaw - self.yaw)
 
-        # rotate world error into body frame (base_link-like)
         cy = math.cos(self.yaw)
         sy = math.sin(self.yaw)
         ex =  cy * dx + sy * dy
         ey = -sy * dx + cy * dy
 
-        # near-goal check
+        # near-goal check（只改“到点后做什么”：进入hold+切下一点；不改判定本身）
         if dist < self.pos_tol and abs(eyaw) < self.yaw_tol:
+            # ====== 外层动作编排：到点停2秒 + 切下一点（新增）======
+            self.hold_until_t = now_t + self.hold_sec
             self.stop_robot()
-            if self._tick % int(self.control_hz) == 0:  # about 1Hz print
-                self.get_logger().info(f"Reached goal. dist={dist:.3f} yaw_err={eyaw:.3f}. stopped.")
+            self.advance_waypoint()
+
+            if self._tick % int(self.control_hz) == 0:
+                self.get_logger().info(
+                    f"Reached goal. dist={dist:.3f} yaw_err={eyaw:.3f}. hold {self.hold_sec:.1f}s then next."
+                )
             return
 
-        # PID compute
-        # If we saturate heavily, you may freeze integrator; here we keep it simple and rely on i_max + small Ki.
         vx = self.pid_x.step(ex, self.dt)
         vy = self.pid_y.step(ey, self.dt)
         wz = self.pid_yaw.step(eyaw, self.dt)
 
-        # slow down near target (position only)
         if self.slow_dist > 1e-6:
             scale = min(1.0, dist / self.slow_dist)
-            scale = max(scale, 0.12) # 最低保留 20% 力度（你可以 0.15~0.3 试）
+            scale = max(scale, 0.12)
             vx *= scale
             vy *= scale
 
-        # clamp outputs
         vx = clamp(vx, -self.vx_max, self.vx_max)
         vy = clamp(vy, -self.vy_max, self.vy_max)
         wz = clamp(wz, -self.wz_max, self.wz_max)
 
-        # publish
         tw = Twist()
         tw.linear.x = float(vx)
         tw.linear.y = float(vy)
         tw.angular.z = float(wz)
+
         self.get_logger().info(f"pub cmd: {tw}")
         self.pub_cmd.publish(tw)
 
@@ -306,11 +345,9 @@ class PIDGoToGoal(Node):
                                 f"{ex:.6f}", f"{ey:.6f}", f"{eyaw:.6f}",
                                 f"{vx:.6f}", f"{vy:.6f}", f"{wz:.6f}",
                                 f"{self.fb_vx:.6f}", f"{self.fb_vy:.6f}"])
-            # flush sometimes
             if self._tick % int(self.control_hz) == 0:
                 self._csv_file.flush()
 
-        # optional debug print (light)
         if self._tick % int(self.control_hz) == 0:
             self.get_logger().info(
                 f"pos=({self.x:.2f},{self.y:.2f}) yaw={self.yaw:.2f} | "
@@ -319,24 +356,21 @@ class PIDGoToGoal(Node):
             )
 
 
-
-
 def main():
     rclpy.init()
     node = PIDGoToGoal()
-    t0 = time.perf_counter()          # ✅ 开始计时（高精度）
+    t0 = time.perf_counter()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        dt = time.perf_counter() - t0 # ✅ 结束计时
+        dt = time.perf_counter() - t0
         print(f"\nRUN TIME = {dt:.3f} s\n")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
+
 if __name__ == "__main__":
     main()
-
-
