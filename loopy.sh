@@ -1,1 +1,1 @@
-python3 /opt/project/robot_base_ctl/base_ctl/loopy.py
+python3 /opt/project/robot_base_ctl/tool/base_ctl_path.py

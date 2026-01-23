@@ -1,4 +1,4 @@
-# 配置电机can通讯
+# 配置鸣志电机can通讯
 ##  配置电机can通讯参数， 
 使用usb串口连接到电机上面，打开 luna的can配置工具，如下图所示
 ![Moons Luna CAN配置](moons_luna_config_can.png) 

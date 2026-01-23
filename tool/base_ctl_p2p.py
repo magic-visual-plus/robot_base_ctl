@@ -93,7 +93,7 @@ class PIDGoToGoal(Node):
         self.declare_parameter("odom_topic", odom_topic_name)
         self.declare_parameter("cmd_topic", "/cmd_vel")
         self.declare_parameter("path_topic", "/pid_path")
-        self.declare_parameter("goal_x", 1.0)
+        self.declare_parameter("goal_x", 0.0)
         self.declare_parameter("goal_y", 0.0)
         self.declare_parameter("goal_yaw", 0.0)  # rad
         self.declare_parameter("control_hz", 50.0)
@@ -108,14 +108,14 @@ class PIDGoToGoal(Node):
         self.declare_parameter("wz_max", 2.0)       # rad/s (increased for faster rotation)
 
         # PID gains (start conservative; tune later)
-        self.declare_parameter("kp_xy", 3) #1.2
+        self.declare_parameter("kp_xy", 2) #1.2
         self.declare_parameter("ki_xy", 0.0)
         self.declare_parameter("kd_xy", 0.1)
         self.declare_parameter("imax_xy", 0.3)
 
         self.declare_parameter("kp_yaw", 2.0) 
         self.declare_parameter("ki_yaw", 0.0)
-        self.declare_parameter("kd_yaw", 0.15) #0.2
+        self.declare_parameter("kd_yaw", 0.3) #0.2
         self.declare_parameter("imax_yaw", 0.5)
 
         # logging

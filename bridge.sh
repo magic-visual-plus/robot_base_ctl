@@ -1,2 +1,10 @@
-/home/user/anaconda3/envs/lerobot/bin/python \
-  /opt/project/robot_base_ctl/base_ctl/lekiwi_base_bridge.py
+#!/bin/bash
+# set -e
+
+# sudo ip link set can0 down
+# sudo ip link set can0 type can bitrate 1000000 restart-ms 100
+# sudo ip link set can0 txqueuelen 2000
+# sudo ip link set can0 up
+# ip -details link show can0
+
+python3 /opt/project/robot_base_ctl/motor/moons/bridge.py

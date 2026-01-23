@@ -102,7 +102,7 @@ class PIDGoToGoal(Node):
         self.declare_parameter("vy_max", 0.5)       # m/s
         self.declare_parameter("wz_max", 2.0)       # rad/s
 
-        self.declare_parameter("kp_xy", 3)
+        self.declare_parameter("kp_xy", 1.5)
         self.declare_parameter("ki_xy", 0.0)
         self.declare_parameter("kd_xy", 0.1)
         self.declare_parameter("imax_xy", 0.3)
@@ -179,13 +179,16 @@ class PIDGoToGoal(Node):
         self._tick = 0
         self._csv_file = open(self.out_csv, "w", newline="")
         self._csv = csv.writer(self._csv_file)
-        self._csv.writerow(["t_sec","x","y","yaw","err_x","err_y","err_yaw","cmd_vx","cmd_vy","cmd_wz","fb_vx","fb_vy"])
+        self._csv.writerow(["t_sec","x","y","yaw","err_x","err_y","err_yaw","cmd_vx","cmd_vy","cmd_wz","Sfb_vx","fb_vy"])
 
         # ============================================================
         # 外层动作编排（新增）：(1,1,0) -> 停2秒 -> (0,0,0) -> 停2秒 -> 退出
         # 只负责在“到点”那一刻切换 goal，不改你的控制律
         # ============================================================
-        self.waypoints = [(1.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+        self.waypoints = [(0.0, 0.0, 0.0), 
+                          (-1, 0, 0.0),
+                          (-1, 1, 0.0),
+                          (0, 1, 0.0)]
         self.wp_idx = 0
 
         self.hold_sec = 2.0
