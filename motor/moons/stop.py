@@ -112,7 +112,7 @@ def main():
     eds_file_path = '/home/nvidia/github/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds'
     interface = 'socketcan'
     channel = 'can0'
-    bitrate = 500000
+    bitrate = 1000000
 
     # Put the nodes you want to stop:
     node_ids = [1, 2, 3]

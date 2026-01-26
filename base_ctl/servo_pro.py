@@ -55,7 +55,7 @@ DT_CTRL    = 1.0 / CONTROL_HZ
 DT_KEY     = (1.0 / DATASET_HZ) / PLAYBACK_SCALE
 
 # ---- gains
-KP_POS = 0.5
+KP_POS = 1.5
 KI_POS = 0.0
 I_LIM  = 0.30
 

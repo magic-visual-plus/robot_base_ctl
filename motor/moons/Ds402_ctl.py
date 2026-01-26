@@ -620,8 +620,8 @@ class Ds402Motor(Motor):
 
         # Limit TPDO rate (example 20Hz)
         try:
-            self.io.configure_tpdo_limit_rate(self.io.cfg.tpdo_status_num, enable=True, trans_type=255, event_timer_ms=50)
-            self.io.configure_tpdo_limit_rate(self.io.cfg.tpdo_fb_num, enable=True, trans_type=255, event_timer_ms=50)
+            self.io.configure_tpdo_limit_rate(self.io.cfg.tpdo_status_num, enable=True, trans_type=255, event_timer_ms=10)
+            self.io.configure_tpdo_limit_rate(self.io.cfg.tpdo_fb_num, enable=True, trans_type=255, event_timer_ms=10)
         except Exception as e:
             LOG.warning("TPDO rate limit config failed axis=%d: %s", self.axis_id, e)
 

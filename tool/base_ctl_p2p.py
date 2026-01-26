@@ -319,8 +319,6 @@ class PIDGoToGoal(Node):
             )
 
 
-
-
 def main():
     rclpy.init()
     node = PIDGoToGoal()
