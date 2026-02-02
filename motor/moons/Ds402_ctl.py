@@ -316,6 +316,7 @@ class CanopenBus:
                 )
             else:
                 self.net.connect(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
+                self.net.sync.start(0.1)
         except TypeError:
             LOG.warning("connect() does not accept can_filters; connecting without filters.")
             self.net.connect(interface=self.interface, channel=self.channel, bitrate=self.bitrate)

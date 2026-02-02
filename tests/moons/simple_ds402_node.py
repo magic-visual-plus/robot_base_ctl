@@ -10,14 +10,14 @@ import logging
 
 # 启用 socketcan 模块的详细日志
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
 # 设置can日志针对性启用收发日志
-logging.getLogger('can.interfaces.socketcan').setLevel(logging.INFO)
-logging.getLogger('can.interfaces.socketcan.tx').setLevel(logging.INFO)
-logging.getLogger('can.interfaces.socketcan.rx').setLevel(logging.INFO)
+logging.getLogger('can.interfaces.socketcan').setLevel(logging.DEBUG)
+logging.getLogger('can.interfaces.socketcan.tx').setLevel(logging.DEBUG)
+logging.getLogger('can.interfaces.socketcan.rx').setLevel(logging.DEBUG)
 
 try:
 
@@ -25,17 +25,18 @@ try:
     network = canopen.Network()
 
     # Connect to the CAN bus
-    eds_file_path = '/opt/project/ros2_canopen_ws/test/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds'
+    eds_file_path = '/opt/project/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-DulAxes-V1.0.eds'
+    # eds_file_path = '/opt/project/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds'
 
     # Add some nodes with corresponding Object Dictionaries
     node = canopen.BaseNode402(1, eds_file_path)
     network.add_node(node)
-    
-    node.sdo.RESPONSE_TIMEOUT = 2.0 
-    
+
+    node.sdo.RESPONSE_TIMEOUT = 5.0
+
     try:
-        network.connect(interface='socketcan', channel='can1', bitrate=50000)
-        print(f"Connected to CAN interface: can1")
+        network.connect(interface='socketcan', channel='can0', bitrate=1000000)
+        print(f"Connected to CAN interface: can0")
     except Exception as e:
         print(f"Failed to connect to CAN bus: {e}")
         sys.exit(1)
@@ -47,20 +48,21 @@ try:
     # network.add_node(node)
     # network.add_node(34, 'eds/example34.eds')
     # node = network[34]
-    
+
     print(f'before set nmt state {node.nmt.state}')
 
     # Reset network
     # node.nmt.state = 'RESET COMMUNICATION'
-    node.nmt.state = 'OPERATIONAL'
-    #node.nmt.state = 'RESET'
+    # node.nmt.state = 'OPERATIONAL'
+    node.nmt.state = 'PRE-OPERATIONAL'
     # node.nmt.wait_for_bootup(5)
     node.tpdo[1].wait_for_reception()
-    
+
     print('Node booted up')
+    print(f'after set nmt state {node.nmt.state}')
     device_name = node.sdo[0x1008].raw
     vendor_id = node.sdo[0x1018][1].raw
-
+    
     print(f'device_name: {device_name}')
     print(f'vendor_id: {vendor_id}')
 
@@ -86,11 +88,11 @@ try:
 
     # Transmit SYNC every 100 ms
     network.sync.start(0.1)
-    
+
     # exit(1)
 
     node.load_configuration()
-    
+
     node.tpdo.read()
     node.rpdo.read()
 
@@ -105,7 +107,12 @@ try:
     print(vendor_id)
 
     # node.state = 'SWITCH ON DISABLED'
+    
+    # print tpdo enabled status 
+    for i in range(1, 5):
+        print(f'TPDO {i} enabled: {node.tpdo[i].enabled}')
 
+    exit(1)
     print(f'node state 4) = {node.nmt.state}')
     vel_variable = 'Velocity value calculated'
     status_variable = 'Status word'
@@ -128,9 +135,14 @@ try:
     # node.rpdo[1].transmit()
     # node.rpdo[1]['Control word'].raw = 0x81
     # node.rpdo[1].transmit()
-
+    print(f'node state 5  {node.state}')
+    # node.state = 'SWITCH ON DISABLED'
+    # time.sleep(1)
+    node.nmt.state = 'OPERATIONAL'
     node.state = 'READY TO SWITCH ON'
+    time.sleep(1)
     node.state = 'SWITCHED ON'
+    time.sleep(1)
 
     # node.rpdo.export('database.dbc')
 
@@ -160,15 +172,15 @@ try:
         time.sleep(0.001)
 
     print(f'Node Status {node.state}')
-    
-   
+
+
     print("==================")
 
     rpdo_ids = node.rpdo_pointers.keys()
-    # print rpdo ids in hex format 
+    # print rpdo ids in hex format
     for rpdo_id in rpdo_ids:
         print(f'rpdo id 0x{rpdo_id:04X}')
-    
+
     exit(1)
     # -----------------------------------------------------------------------------------------
     node.nmt.start_node_guarding(0.01)
@@ -210,4 +222,3 @@ finally:
             node.nmt.stop_node_guarding()
         network.sync.stop()
         network.disconnect()
-

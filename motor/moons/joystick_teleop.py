@@ -5,6 +5,10 @@ import time
 import math
 
 from oni_ctrl import LeKiwiBaseConfig, LeKiwiBaseController
+import os
+
+# get cur_dir
+cur_dir = os.path.dirname(os.path.abspath(__file__))
 
 # ----------------------------------------------
 # 找手柄设备
@@ -33,7 +37,8 @@ class JoystickController:
         cfg = LeKiwiBaseConfig(
             can_channel="can0",
             bitrate=1_000_000,
-            eds_path="/home/nvidia/github/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds",
+            # eds_path=f"{cur_dir}/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds",
+            eds_path=f"{cur_dir}/CANOPEN-EDS-MBDV-Servo-DulAxes-V1.0.eds",
             encoder_cpr=2 ** 16,
             gear_ratio=10.0,
             wheel_radius=0.1015,
@@ -57,7 +62,7 @@ class JoystickController:
         self.rx = 0.0   # 右摇杆左右（旋转）
 
         # 最大速度
-        self.linear_scale = 0.2     # m/s
+        self.linear_scale = 0.5     # m/s
         self.angular_scale = -45.0   # deg/s
 
         # 开线程持续驱动

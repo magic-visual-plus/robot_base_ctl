@@ -110,12 +110,13 @@ def stop_one_node(node, rpdo_no: int = 3):
 def main():
     # === CONFIG YOU MAY EDIT ===
     eds_file_path = '/home/nvidia/github/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds'
+    eds_file_path = '/opt/project/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-DulAxes-V1.0.eds'
     interface = 'socketcan'
     channel = 'can0'
     bitrate = 1000000
 
     # Put the nodes you want to stop:
-    node_ids = [1, 2, 3]
+    node_ids = [1]
     # ===========================
 
     net = None
@@ -159,6 +160,7 @@ def main():
                 n.tpdo.read()
                 n.rpdo.read()
             except:
+                print(f"  ! Error reading PDO mapping for node {n.id}")
                 pass
 
         # Stop one by one, but each stop is robust and fast

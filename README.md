@@ -12,3 +12,5 @@ python /opt/project/rko_lio_ws/bridge.sh
 这个是订阅 cmd_vel, 控制底盘运动的      
 python /opt/project/robot_base_ctl/base_ctl/zoh_rev.py
 这个是接收/ref_pose用于控制底盘
+<!-- 遥操作 -->
+python /opt/project/robot_base_ctl/motor/moons/joystick_teleop.py

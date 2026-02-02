@@ -9,6 +9,10 @@ from geometry_msgs.msg import Twist, PoseStamped, TwistStamped
 import csv
 import os
 
+#死区逻辑 
+POS_DEADBAND = 0.05          # 2cm
+YAW_DEADBAND = math.radians(2.0)  # 2度（可调）
+
 ODOM_TOPIC = "/rko_lio/odometry"
 REF_POSE_TOPIC  = "/ref_pose"
 REF_TWIST_TOPIC = "/ref_twist"
@@ -28,8 +32,8 @@ I_LIM  = 0.30
 KP_YAW = 1.3
 W_MAX  = 1.2
 
-V_FRONT_MAX = 0.8
-V_LEFT_MAX  = 0.8
+V_FRONT_MAX = 0.3
+V_LEFT_MAX  = 0.3
 
 A_FRONT_MAX = 1.1
 A_LEFT_MAX  = 1.1
@@ -158,15 +162,28 @@ class Assist(Node):
 
         # FB error -> body
         err_f, err_l = world_to_body(yaw, x_ref - x, y_ref - y)
+        pos_err = math.hypot(err_f, err_l)
 
-        self.intF = clamp(self.intF + err_f*dt, -I_LIM, I_LIM)
-        self.intL = clamp(self.intL + err_l*dt, -I_LIM, I_LIM)
+        # ===== deadband =====
+        if pos_err < POS_DEADBAND:
+            # 死区逻辑
+            err_f = 0.0
+            err_l = 0.0
+            self.intF = 0.0
+            self.intL = 0.0
+        else:
+            self.intF = clamp(self.intF + err_f*dt, -I_LIM, I_LIM)
+            self.intL = clamp(self.intL + err_l*dt, -I_LIM, I_LIM)
 
         vfb_f = KP_POS*err_f + KI_POS*self.intF
         vfb_l = KP_POS*err_l + KI_POS*self.intL
 
         yaw_err = wrap_to_pi(yaw_ref - yaw)
+        if abs(yaw_err) < YAW_DEADBAND:
+            yaw_err = 0.0
+
         wz_fb = KP_YAW * yaw_err
+
 
         vf = vff_f + vfb_f
         vl = vff_l + vfb_l

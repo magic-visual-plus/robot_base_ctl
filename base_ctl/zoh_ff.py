@@ -2,21 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import math
-import re
 import time
-import pandas as pd
+import zmq
+import json
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, TwistStamped
-
-
-CSV_PATH   = "/opt/project/robot_base_ctl/data_20251219_201132_100/data_20251219_201132_100/control_data.csv"
-MAX_FRAMES = 270
-
-X_COL   = "base_x"
-Y_COL   = "base_y"
-YAW_COL = "base_pitch"   # 不是yaw就改
 
 REF_POSE_TOPIC  = "/ref_pose"
 REF_TWIST_TOPIC = "/ref_twist"
@@ -24,14 +16,6 @@ REF_TWIST_TOPIC = "/ref_twist"
 PUBLISH_HZ = 10.0
 DT_PUB = 1.0 / PUBLISH_HZ
 
-_TENSOR_RE = re.compile(r"tensor\(\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*\)")
-
-def parse_tensor_like(x):
-    if isinstance(x, (int, float)):
-        return float(x)
-    s = str(x).strip()
-    m = _TENSOR_RE.fullmatch(s)
-    return float(m.group(1)) if m else float(s)
 
 def yaw_to_quat(yaw):
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
@@ -39,93 +23,139 @@ def yaw_to_quat(yaw):
 def wrap_to_pi(a):
     return (a + math.pi) % (2*math.pi) - math.pi
 
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
 
-class CSVRefPubSeq(Node):
+
+class ZMQRefPub(Node):
     def __init__(self):
-        super().__init__("csv_ref_pub_seq")
+        super().__init__("zmq_ref_pub_pose_twist")
 
-        df = pd.read_csv(CSV_PATH)
-        self.x   = df[X_COL].map(parse_tensor_like).astype(float).to_numpy()
-        self.y   = df[Y_COL].map(parse_tensor_like).astype(float).to_numpy()
-        self.yaw = df[YAW_COL].map(parse_tensor_like).astype(float).to_numpy()
+        # ===== ZMQ =====
+        self.zmq_addr = "tcp://10.8.0.90:4399"
+        self.zmq_topic = "control"
 
-        self.n_total = len(self.x)
-        self.n_play  = min(self.n_total, MAX_FRAMES)
+        self.ctx = zmq.Context.instance()
+        self.sock = self.ctx.socket(zmq.SUB)
+        self.sock.connect(self.zmq_addr)
+        self.sock.setsockopt_string(zmq.SUBSCRIBE, self.zmq_topic)
 
-        self.idx = 0
+        self.poller = zmq.Poller()
+        self.poller.register(self.sock, zmq.POLLIN)
 
+        self.get_logger().info(f"[ZMQ] connect {self.zmq_addr}, sub '{self.zmq_topic}'")
+
+        # pubs
         self.pub_pose  = self.create_publisher(PoseStamped,  REF_POSE_TOPIC,  10)
         self.pub_twist = self.create_publisher(TwistStamped, REF_TWIST_TOPIC, 10)
 
         self.timer = self.create_timer(DT_PUB, self.on_timer)
 
-        self.get_logger().info(f"[SEQ] CSV total={self.n_total}, play={self.n_play}")
-        self.get_logger().info(f"[SEQ] publish_hz={PUBLISH_HZ} pose={REF_POSE_TOPIC} twist={REF_TWIST_TOPIC}")
-        self.get_logger().info("[SEQ] FF twist = finite-diff between consecutive rows (world frame)")
+        # last state for finite diff
+        self.last_x = None
+        self.last_y = None
+        self.last_yaw = None
+        self.last_t = None  # monotonic time
+
+        self.get_logger().info(f"[REF] publish_hz={PUBLISH_HZ} pose={REF_POSE_TOPIC} twist={REF_TWIST_TOPIC}")
+        self.get_logger().info("[REF] mode=ZMQ control -> /ref_pose + /ref_twist (finite-diff)")
+
+    def _recv_latest(self):
+        """
+        把当前 ZMQ 缓冲里能取到的消息尽量取完，返回“最新一条”
+        这样避免 backlog 导致你发的是旧消息。
+        """
+        latest = None
+        while True:
+            socks = dict(self.poller.poll(timeout=0))
+            if self.sock not in socks:
+                break
+            try:
+                topic, payload = self.sock.recv_multipart(flags=zmq.NOBLOCK)
+                latest = (topic, payload)
+            except zmq.Again:
+                break
+        return latest
 
     def on_timer(self):
-        if self.idx >= self.n_play:
-            self.get_logger().info("[SEQ] done. stop timer.")
-            self.timer.cancel()
+        got = self._recv_latest()
+        if got is None:
             return
 
-        row = self.idx
-        x = float(self.x[row])
-        y = float(self.y[row])
-        yaw = float(self.yaw[row])
+        try:
+            topic, payload = got
+            msg = json.loads(payload.decode("utf-8"))
 
-        stamp = self.get_clock().now().to_msg()
+            # 你当前字段名（注意大小写）
+            x   = float(msg["base_X"])
+            y   = float(msg["base_Y"])
+            yaw = float(msg["pitch"])   # 你现在把 pitch 当 yaw 用
 
-        # ---- pose ----
-        pose = PoseStamped()
-        pose.header.stamp = stamp
-        pose.header.frame_id = "map"
-        pose.pose.position.x = x
-        pose.pose.position.y = y
-        qx, qy, qz, qw = yaw_to_quat(yaw)
-        pose.pose.orientation.x = qx
-        pose.pose.orientation.y = qy
-        pose.pose.orientation.z = qz
-        pose.pose.orientation.w = qw
+            now_t = time.monotonic()
 
-        # ---- twist FF (world) ----
-        tw = TwistStamped()
-        tw.header.stamp = stamp
-        tw.header.frame_id = "map"
+            # dt：用真实到达时间差更合理
+            if self.last_t is None:
+                dt = DT_PUB
+            else:
+                dt = now_t - self.last_t
+                # 防止 dt 太小/太大（比如 burst 或断流后恢复）
+                dt = clamp(dt, 0.001, 0.5)
 
-        if row == 0:
-            vx = vy = wz = 0.0
-        else:
-            dt = DT_PUB  # 因为你就是按这个节拍“读一条发一条”
-            vx = (x - float(self.x[row-1])) / dt
-            vy = (y - float(self.y[row-1])) / dt
-            dyaw = wrap_to_pi(yaw - float(self.yaw[row-1]))
-            wz = dyaw / dt
+            # ---- pose ----
+            stamp = self.get_clock().now().to_msg()
+            pose = PoseStamped()
+            pose.header.stamp = stamp
+            pose.header.frame_id = "map"
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            qx, qy, qz, qw = yaw_to_quat(yaw)
+            pose.pose.orientation.x = qx
+            pose.pose.orientation.y = qy
+            pose.pose.orientation.z = qz
+            pose.pose.orientation.w = qw
 
-        tw.twist.linear.x  = vx
-        tw.twist.linear.y  = vy
-        tw.twist.angular.z = wz
+            # ---- twist (world frame) ----
+            tw = TwistStamped()
+            tw.header.stamp = stamp
+            tw.header.frame_id = "map"
 
-        self.pub_pose.publish(pose)
-        self.pub_twist.publish(tw)
+            if self.last_x is None:
+                vx = vy = wz = 0.0
+            else:
+                vx = (x - self.last_x) / dt
+                vy = (y - self.last_y) / dt
+                dyaw = wrap_to_pi(yaw - self.last_yaw)
+                wz = dyaw / dt
 
-        # 打印对齐用（可删）
-        self.get_logger().info(
-            f"[SEQ] row={row+2} x={x:+.4f} y={y:+.4f} yaw={yaw:+.4f} | "
-            f"ff(vx,vy,wz)=({vx:+.3f},{vy:+.3f},{wz:+.3f})"
-        )
+            tw.twist.linear.x  = vx
+            tw.twist.linear.y  = vy
+            tw.twist.angular.z = wz
 
-        self.idx += 1
+            # publish
+            self.pub_pose.publish(pose)
+            self.pub_twist.publish(tw)
+
+            self.get_logger().info(
+                f"[ZMQ->REF] x={x:+.4f} y={y:+.4f} yaw={yaw:+.4f} | "
+                f"ff(vx,vy,wz)=({vx:+.3f},{vy:+.3f},{wz:+.3f}) dt={dt:.3f}"
+            )
+
+            # update last
+            self.last_x, self.last_y, self.last_yaw, self.last_t = x, y, yaw, now_t
+
+        except Exception as e:
+            self.get_logger().warning(f"[ZMQ] error: {e}")
 
 
 def main():
     rclpy.init()
-    node = CSVRefPubSeq()
+    node = ZMQRefPub()
     try:
         rclpy.spin(node)
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
