@@ -10,7 +10,7 @@ import csv
 import os
 
 #死区逻辑 
-POS_DEADBAND = 0.05          # 2cm
+POS_DEADBAND = 0.02          # 2cm
 YAW_DEADBAND = math.radians(2.0)  # 2度（可调）
 
 ODOM_TOPIC = "/rko_lio/odometry"
@@ -30,10 +30,10 @@ KI_POS = 0.0
 I_LIM  = 0.30
 
 KP_YAW = 1.3
-W_MAX  = 1.2
+W_MAX  = 1.0
 
-V_FRONT_MAX = 0.3
-V_LEFT_MAX  = 0.3
+V_FRONT_MAX = 0.1
+V_LEFT_MAX  = 0.1
 
 A_FRONT_MAX = 1.1
 A_LEFT_MAX  = 1.1
@@ -116,7 +116,10 @@ class Assist(Node):
     def get_pose(self):
         p = self.odom.pose.pose.position
         q = self.odom.pose.pose.orientation
-        return float(p.x), float(p.y), float(quat_to_yaw(q))
+        # rotate yaw to 90
+        base_x = float(p.x)
+        base_y = float(p.y)
+        return base_x, base_y, float(quat_to_yaw(q))
 
     def _slew(self, target, last, amax, dt):
         dv = amax * dt
