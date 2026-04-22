@@ -1,0 +1,6 @@
+phi_torso_teleop_node:
+  ros__parameters:
+    height_tolerance_mm: 1.0
+    command_check_rate: 10.0
+    waist_height_offset_mm: 200.0
+

@@ -23,6 +23,8 @@ import logging
 from dataclasses import dataclass
 import canopen
 
+from _paths import EDS_SINGLE_AXIS
+
 
 # ------------------- Logging -------------------
 logging.basicConfig(
@@ -35,7 +37,7 @@ logging.getLogger("can.interfaces.socketcan").setLevel(logging.WARNING)
 # ------------------- Config -------------------
 @dataclass(frozen=True)
 class Config:
-    eds_file: str = "/home/nvidia/github/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds"
+    eds_file: str = EDS_SINGLE_AXIS
     node_id: int = 2
 
     can_interface: str = "socketcan"

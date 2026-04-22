@@ -103,12 +103,12 @@ class PIDGoToGoal(Node):
         self.declare_parameter("slow_dist", 0.01)   # m (within this, scale down vx/vy)
 
         # speed limits (body frame)
-        self.declare_parameter("vx_max", 0.5)      # m/s
-        self.declare_parameter("vy_max", 0.5)      # m/s
-        self.declare_parameter("wz_max", 2.0)       # rad/s (increased for faster rotation)
+        self.declare_parameter("vx_max", 0.2)      # m/s
+        self.declare_parameter("vy_max", 0.2)      # m/s
+        self.declare_parameter("wz_max", 1.0)       # rad/s (increased for faster rotation)
 
         # PID gains (start conservative; tune later)
-        self.declare_parameter("kp_xy", 2) #1.2
+        self.declare_parameter("kp_xy", 1) #1.2
         self.declare_parameter("ki_xy", 0.0)
         self.declare_parameter("kd_xy", 0.1)
         self.declare_parameter("imax_xy", 0.3)
@@ -216,11 +216,11 @@ class PIDGoToGoal(Node):
         # So: robot_x = odom_y, robot_y = -odom_x
         odom_x = float(msg.pose.pose.position.x)
         odom_y = float(msg.pose.pose.position.y)
-        # self.x = odom_y   # robot x = odom y
-        # self.y = -odom_x  # robot y = -odom x
+        self.x = odom_y   # robot x = odom y
+        self.y = -odom_x  # robot y = -odom x
         
-        self.x = odom_x
-        self.y = odom_y
+        # self.x = odom_x
+        # self.y = odom_y
         # TODO enable later 
         q = msg.pose.pose.orientation
         self.yaw = yaw_from_quat(q.x, q.y, q.z, q.w)

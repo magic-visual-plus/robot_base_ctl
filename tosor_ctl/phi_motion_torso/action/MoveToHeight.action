@@ -1,0 +1,13 @@
+# Goal: target height in millimeters
+float64 target_height_mm
+
+---
+# Result: final position and height
+bool success
+string message
+int32 final_position_pulse
+float64 final_height_mm
+
+---
+# Feedback: current progress (simplified)
+float64 current_height_mm

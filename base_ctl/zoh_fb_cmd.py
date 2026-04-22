@@ -2,35 +2,28 @@
 # -*- coding: utf-8 -*-
 
 """
-csv_ref_pub_seq.py
+zoh_fb_cmd.py
 
-顺序播放 CSV：
-- 每次 timer 触发：读当前 idx 的一行 -> 发布 /ref_pose -> idx += 1
-- 不使用 k，不使用 DT_KEY，不做插值，不做 ZOH
-- 播放到 MAX_FRAMES 或 CSV 末尾就停止（或者你也可以改成循环）
+提供原生 Action `nav2_msgs/action/NavigateToPose`：goal 为 `geometry_msgs/PoseStamped`，
+持续发布 `/ref_pose` 直至里程计反馈到达容差内（与 Nav2 接口一致，便于用标准客户端调用）。
 """
 
 import math
-
 import time
-import zmq
-import json
 
 import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
-from std_srvs.srv import Trigger
-
-X_COL   = "base_x"
-Y_COL   = "base_y"
-YAW_COL = "base_pitch"  
+from nav_msgs.msg import Odometry
+from nav2_msgs.action import NavigateToPose
+from std_msgs.msg import Empty
 
 REF_POSE_TOPIC = "/ref_pose"
-
-PUBLISH_HZ = 10.0        
-DT_PUB = 1.0 / PUBLISH_HZ
-# ====================================
-
+ODOM_TOPIC = "/rko_lio/odometry"
 
 
 def yaw_to_quat(yaw):
@@ -38,114 +31,166 @@ def yaw_to_quat(yaw):
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
 
 
+def quat_to_yaw(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+def wrap_to_pi(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
 class CSVRefPubSeq(Node):
     def __init__(self):
         super().__init__("csv_ref_pub_seq")
 
-        self.active = False   # 默认不发
-    
-        
-        # ===== ZMQ =====
-        self.zmq_addr = "tcp://10.8.0.90:4399"
-        self.zmq_topic = "control"
+        # 默认与项目约定路径一致；若需 Nav2 默认名可改为 navigate_to_pose
+        self.declare_parameter(
+            "action_server_name", "/phi/motion/control/navigate_to_pose"
+        )
+        self.declare_parameter("action_timeout_sec", 120.0)
+        self.declare_parameter("action_stable_time_sec", 0.3)
+        self.declare_parameter("action_pos_tolerance_m", 0.08)
+        self.declare_parameter("action_yaw_tolerance_rad", math.radians(2.0))
 
-        self.ctx = zmq.Context.instance()
-        self.sock = self.ctx.socket(zmq.SUB)
-        self.sock.connect(self.zmq_addr)
-        self.sock.setsockopt_string(zmq.SUBSCRIBE, self.zmq_topic)
-
-        self.poller = zmq.Poller()
-        self.poller.register(self.sock, zmq.POLLIN)
-
-        self.get_logger().info(f"[ZMQ] connect {self.zmq_addr}, sub '{self.zmq_topic}'")
-
-        self.idx = 0
+        self.odom: Odometry | None = None
+        self.create_subscription(Odometry, ODOM_TOPIC, self.cb_odom, 10)
 
         self.pub_pose = self.create_publisher(PoseStamped, REF_POSE_TOPIC, 10)
-        self.timer = self.create_timer(DT_PUB, self.on_timer)
-        self.reset_cli = self.create_client(Trigger, "/rko_lio/reset_odometry")
 
-        
-        self.last_print_t = time.monotonic()
+        self._action_running = False
+        self._cb_group = ReentrantCallbackGroup()
+        action_name = str(self.get_parameter("action_server_name").value)
+        self._action_server = ActionServer(
+            self,
+            NavigateToPose,
+            action_name,
+            execute_callback=self.execute_navigate_to_pose,
+            goal_callback=self.goal_callback,
+            cancel_callback=self.cancel_callback,
+            callback_group=self._cb_group,
+        )
+        self.get_logger().info(f"[ACTION] NavigateToPose server: {action_name}")
 
-        self.get_logger().info(f"[REF] publish_hz={PUBLISH_HZ}, topic={REF_POSE_TOPIC}")
-        self.get_logger().info("[REF] mode=ZMQ control -> /ref_pose")
+        self.get_logger().info(f"[REF] topic={REF_POSE_TOPIC} (NavigateToPose only)")
 
-    def on_timer(self):
-       # 1) poll：0ms 非阻塞
-        socks = dict(self.poller.poll(timeout=0))
-        if self.sock not in socks:
-            return
+    def cb_odom(self, msg: Odometry):
+        self.odom = msg
+
+    def get_pose_from_odom(self):
+        """与 zoh_rev.py Assist.get_pose、base_ctl.get_pose 一致：平面 x,y,yaw = odom.pose.pose"""
+        p = self.odom.pose.pose.position
+        q = self.odom.pose.pose.orientation
+        return float(p.x), float(p.y), float(quat_to_yaw(q))
+
+    def current_pose_stamped(self) -> PoseStamped:
+        """Feedback：与 `ros2 topic echo /rko_lio/odometry` 中 pose.pose 一致（同坐标、同四元数）。"""
+        ps = PoseStamped()
+        ps.header = self.odom.header
+        ps.pose = self.odom.pose.pose
+        return ps
+
+    def publish_ref_pose(self, x: float, y: float, yaw: float):
+        stamp = self.get_clock().now().to_msg()
+        pose = PoseStamped()
+        pose.header.stamp = stamp
+        pose.header.frame_id = "map"
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        qx, qy, qz, qw = yaw_to_quat(yaw)
+        pose.pose.orientation.x = qx
+        pose.pose.orientation.y = qy
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        self.pub_pose.publish(pose)
+
+    def goal_callback(self, _goal_request):
+        if self._action_running:
+            self.get_logger().warn("NavigateToPose rejected: another goal is running")
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def cancel_callback(self, _goal_handle):
+        return CancelResponse.ACCEPT
+
+    def execute_navigate_to_pose(self, goal_handle):
+        req = goal_handle.request
+        ps = req.pose
+        x = float(ps.pose.position.x)
+        y = float(ps.pose.position.y)
+        yaw = float(quat_to_yaw(ps.pose.orientation))
+
+        timeout_sec = float(self.get_parameter("action_timeout_sec").value)
+        stable_need = float(self.get_parameter("action_stable_time_sec").value)
+        pos_tol = float(self.get_parameter("action_pos_tolerance_m").value)
+        yaw_tol = float(self.get_parameter("action_yaw_tolerance_rad").value)
+
+        self._action_running = True
+        self.get_logger().info(
+            f"[ACTION] NavigateToPose goal: x={x:.4f} y={y:.4f} yaw={yaw:.4f} "
+            f"frame={ps.header.frame_id!r}"
+        )
+
+        result = NavigateToPose.Result(result=Empty())
+        t0 = time.monotonic()
+        stable_t0 = None
 
         try:
-            topic, payload = self.sock.recv_multipart(flags=zmq.NOBLOCK)
-            msg = json.loads(payload.decode("utf-8"))
-            cmd = str(msg.get("command", "base")).strip().lower()
-            self.get_logger().info(
-            f"[RX] active={self.active} cmd={cmd} "
-            f"base_X={msg.get('base_X', None)} "
-            f"base_Y={msg.get('base_Y', None)} "
-            f"pitch={msg.get('pitch', None)}"
-)
+            while rclpy.ok():
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    return result
 
-            # ---- cmd logic ----
-            if cmd == "start":
-                self.active = True
-                self.get_logger().info("[STATE] active=True")
-                
+                if time.monotonic() - t0 > timeout_sec:
+                    goal_handle.abort()
+                    return result
 
-            elif cmd == "reset":
-                self.active = False
-                self.get_logger().info("[CMD] reset -> call reset_odometry, active=False")
-                if self.reset_cli.service_is_ready():
-                    self.reset_cli.call_async(Trigger.Request())
-                
-            elif cmd == "stop":
-                self.active = False
+                self.publish_ref_pose(x, y, yaw)
 
-            if self.active is False:
-                return
-               
-            # -------------------
+                if self.odom is None:
+                    time.sleep(0.1)
+                    continue
 
-            
-            x = float(msg["base_X"])
-            y = float(msg["base_Y"])
-            yaw = float(msg["pitch"])   # 你现在就是这么叫的（注意：这里被当成yaw）
+                cx, cy, cyaw = self.get_pose_from_odom()
+                pos_err = math.hypot(x - cx, y - cy)
+                yaw_err = wrap_to_pi(yaw - cyaw)
 
-            # 2) 组 PoseStamped
-            stamp = self.get_clock().now().to_msg()
-            pose = PoseStamped()
-            pose.header.stamp = stamp
-            pose.header.frame_id = "map"
-            pose.pose.position.x = x
-            pose.pose.position.y = y
+                elapsed = time.monotonic() - t0
+                sec_i = int(elapsed)
+                nsec = int((elapsed - sec_i) * 1e9)
 
-            qx, qy, qz, qw = yaw_to_quat(yaw)
-            pose.pose.orientation.x = qx
-            pose.pose.orientation.y = qy
-            pose.pose.orientation.z = qz
-            pose.pose.orientation.w = qw
+                fb = NavigateToPose.Feedback()
+                fb.current_pose = self.current_pose_stamped()
+                fb.navigation_time = Duration(sec=sec_i, nanosec=nsec)
+                fb.estimated_time_remaining = Duration(sec=0, nanosec=0)
+                fb.number_of_recoveries = 0
+                fb.distance_remaining = float(pos_err)
+                goal_handle.publish_feedback(fb)
 
-            # 3) 发布
-            self.pub_pose.publish(pose)
-            self.get_logger().info(f"[ZMQ->REF] x={x:+.4f} y={y:+.4f} yaw={yaw:+.4f}")
+                if pos_err < pos_tol and abs(yaw_err) < yaw_tol:
+                    if stable_t0 is None:
+                        stable_t0 = time.monotonic()
+                    elif time.monotonic() - stable_t0 >= stable_need:
+                        goal_handle.succeed()
+                        self.get_logger().info("[ACTION] NavigateToPose succeeded")
+                        return result
+                else:
+                    stable_t0 = None
 
-        except Exception as e:
-            self.get_logger().warning(f"[ZMQ] error: {e}")
+                time.sleep(0.1)
+        finally:
+            self._action_running = False
 
-        # # 6) 每秒打印一次状态
-        # now = time.monotonic()
-        # if now - self.last_print_t > 1.0:
-        #     self.last_print_t = now
-        #     self.get_logger().info(f"[SEQ] idx={self.idx}/{self.n_play} x={x:+.3f} y={y:+.3f} yaw={yaw:+.2f}")
+        goal_handle.abort()
+        return result
 
 
 def main():
     rclpy.init()
     node = CSVRefPubSeq()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
         node.destroy_node()
         rclpy.shutdown()

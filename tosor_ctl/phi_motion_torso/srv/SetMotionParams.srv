@@ -1,0 +1,11 @@
+# Set motion parameters (0 = keep current value)
+int32 profile_velocity
+int32 profile_acceleration
+int32 profile_deceleration
+---
+bool success
+string message
+# Readback values after setting
+int32 profile_velocity
+int32 profile_acceleration
+int32 profile_deceleration

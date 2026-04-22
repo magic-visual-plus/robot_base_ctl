@@ -1,0 +1,4 @@
+# No request fields - just trigger initialization
+---
+bool success
+string message

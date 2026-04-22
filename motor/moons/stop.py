@@ -10,6 +10,7 @@ import time
 import errno
 import logging
 import canopen
+from _paths import EDS_DUAL_AXES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,14 +110,13 @@ def stop_one_node(node, rpdo_no: int = 3):
 
 def main():
     # === CONFIG YOU MAY EDIT ===
-    eds_file_path = '/home/nvidia/github/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-SingleAxis-V1.1.1.eds'
-    eds_file_path = '/opt/project/robot_base_ctl/motor/moons/CANOPEN-EDS-MBDV-Servo-DulAxes-V1.0.eds'
+    eds_file_path = EDS_DUAL_AXES
     interface = 'socketcan'
     channel = 'can0'
     bitrate = 1000000
 
     # Put the nodes you want to stop:
-    node_ids = [1]
+    node_ids = [1,2,3]
     # ===========================
 
     net = None

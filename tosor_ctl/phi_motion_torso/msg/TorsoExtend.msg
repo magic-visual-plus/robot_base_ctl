@@ -1,0 +1,3 @@
+builtin_interfaces/Time stamp
+float64 current_height_mm
+int32 current_encoder_pulse

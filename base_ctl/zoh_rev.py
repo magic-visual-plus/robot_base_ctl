@@ -8,10 +8,18 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, PoseStamped, TwistStamped
 import csv
 import os
+import numpy as np
+from collections import deque
+from scipy.signal import savgol_filter
 
 #死区逻辑 
 POS_DEADBAND = 0.02          # 2cm
 YAW_DEADBAND = math.radians(2.0)  # 2度（可调）
+
+# Savitzky-Golay 滤波器参数
+SG_ENABLE = False    # 是否启用 odom 平滑滤波
+SG_WINDOW = 5       # 窗口大小（必须为奇数）
+SG_POLYORDER = 2    # 多项式阶数
 
 ODOM_TOPIC = "/rko_lio/odometry"
 REF_POSE_TOPIC  = "/ref_pose"
@@ -58,6 +66,12 @@ class Assist(Node):
         self.ref_pose: PoseStamped | None = None
         self.ref_twist: TwistStamped | None = None
 
+        # Savitzky-Golay 滤波缓冲区
+        self.odom_buf_x = deque(maxlen=SG_WINDOW)
+        self.odom_buf_y = deque(maxlen=SG_WINDOW)
+        self.odom_buf_cos_yaw = deque(maxlen=SG_WINDOW)  # 用单位向量表示角度
+        self.odom_buf_sin_yaw = deque(maxlen=SG_WINDOW)
+
         self.create_subscription(Odometry,     ODOM_TOPIC,      self.cb_odom, 10)
         self.create_subscription(PoseStamped,  REF_POSE_TOPIC,  self.cb_pose, 2)
         self.create_subscription(TwistStamped, REF_TWIST_TOPIC, self.cb_tw,   2)
@@ -73,7 +87,7 @@ class Assist(Node):
 
         self.last_pose_t = None
         self.last_tw_t = None
-        self.ref_timeout = 0.2
+        self.ref_timeout = 0.3
         
         # debug counters
         self.pose_rx = 0
@@ -84,6 +98,7 @@ class Assist(Node):
         self.last_err = (0.0, 0.0, 0.0)
 
         self.get_logger().info(f"[CTL] started. output {CONTROL_HZ}Hz cmd_vel")
+        self.get_logger().info(f"[CTL] odom smoothing: {'ON' if SG_ENABLE else 'OFF'} (Savitzky-Golay window={SG_WINDOW}, polyorder={SG_POLYORDER})")
         
                 # ===== logging =====
         os.makedirs(os.path.dirname(LOG_CSV), exist_ok=True)
@@ -102,6 +117,15 @@ class Assist(Node):
 
     def cb_odom(self, m):
         self.odom = m
+        # 将数据存入滤波缓冲区
+        p = m.pose.pose.position
+        q = m.pose.pose.orientation
+        yaw = quat_to_yaw(q)
+        self.odom_buf_x.append(float(p.x))
+        self.odom_buf_y.append(float(p.y))
+        # 用单位向量存储角度，避免周期性问题
+        self.odom_buf_cos_yaw.append(math.cos(yaw))
+        self.odom_buf_sin_yaw.append(math.sin(yaw))
 
     def cb_pose(self, m):
         self.ref_pose = m
@@ -114,12 +138,30 @@ class Assist(Node):
         self.tw_rx += 1
 
     def get_pose(self):
+        # 获取原始数据
         p = self.odom.pose.pose.position
         q = self.odom.pose.pose.orientation
-        # rotate yaw to 90
-        base_x = float(p.x)
-        base_y = float(p.y)
-        return base_x, base_y, float(quat_to_yaw(q))
+        raw_x, raw_y, raw_yaw = float(p.x), float(p.y), float(quat_to_yaw(q))
+        
+        # 未启用滤波或缓冲区未满，返回原始数据
+        if not SG_ENABLE or len(self.odom_buf_x) < SG_WINDOW:
+            return raw_x, raw_y, raw_yaw
+        
+        # 应用 Savitzky-Golay 滤波
+        x_arr = np.array(self.odom_buf_x)
+        y_arr = np.array(self.odom_buf_y)
+        cos_arr = np.array(self.odom_buf_cos_yaw)
+        sin_arr = np.array(self.odom_buf_sin_yaw)
+        
+        x_smooth = savgol_filter(x_arr, SG_WINDOW, SG_POLYORDER)[-1]
+        y_smooth = savgol_filter(y_arr, SG_WINDOW, SG_POLYORDER)[-1]
+        
+        # 对 cos/sin 分别滤波，再用 atan2 恢复角度
+        cos_smooth = savgol_filter(cos_arr, SG_WINDOW, SG_POLYORDER)[-1]
+        sin_smooth = savgol_filter(sin_arr, SG_WINDOW, SG_POLYORDER)[-1]
+        yaw_smooth = math.atan2(sin_smooth, cos_smooth)
+        
+        return float(x_smooth), float(y_smooth), float(yaw_smooth)
 
     def _slew(self, target, last, amax, dt):
         dv = amax * dt
@@ -132,11 +174,11 @@ class Assist(Node):
             return
 
         # ref_pose 超时 -> 停车
-        # if self.last_pose_t is None or (now - self.last_pose_t) > self.ref_timeout:
-        #     self.intF = 0.0
-        #     self.intL = 0.0
-        #     self.pub.publish(Twist())
-        #     return
+        if self.last_pose_t is None or (now - self.last_pose_t) > self.ref_timeout:
+            self.intF = 0.0
+            self.intL = 0.0
+            self.pub.publish(Twist())
+            return
 
         dt = clamp(now - self.last_t, 0.5*DT_CTRL, 3.0*DT_CTRL)
         self.last_t = now

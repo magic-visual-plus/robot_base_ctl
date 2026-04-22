@@ -1,0 +1,12 @@
+{
+  "id": "tongchuan_mdx",
+  "description": "同川 MDX+：0x603F 错误码、0x1001 标准错误寄存器、0x200F DSP 报警、0x6077/0x6078 实际转矩电流（手册单位 0.1% 额定）、0x6061 控制模式显示",
+  "sdo_reads": [
+    { "index": "0x603F", "format": "u16_hex" },
+    { "index": "0x1001", "format": "u32_hex" },
+    { "index": "0x200F", "format": "u32_hex" },
+    { "index": "0x6077", "format": "i16_0p1pct", "unit_note": "rated Tq" },
+    { "index": "0x6078", "format": "i16_0p1pct", "unit_note": "rated I" },
+    { "index": "0x6061", "format": "i8_dec", "unit_note": "mode display (1=PP,3=PV,9=CSV)" }
+  ]
+}
