@@ -1,0 +1,4 @@
+evdev==1.4.0
+canopen==2.4.1
+loguru
+pyserial
