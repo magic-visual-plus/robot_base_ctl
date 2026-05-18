@@ -2,13 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-zoh_fb_cmd.py
+仅通过 `nav2_msgs/action/NavigateToPose` 接收目标：`PoseStamped`。
+执行期间持续发布 `/ref_pose`，直至里程计反馈到达容差（与 Nav2 接口一致）。
 
-订阅 `/phi/motion/teleop/whole_body` 的 `WholeBodyData`，根据 `command_type`
-维护 active 状态，并将 `base_x/base_y/base_pitch` 转为 `/ref_pose` 的 `PoseStamped` 发布。
-
-另提供原生 Action `nav2_msgs/action/NavigateToPose`：goal 为 `geometry_msgs/PoseStamped`，
-持续发布 `/ref_pose` 直至里程计反馈到达容差内（与 Nav2 接口一致，便于用标准客户端调用）。
+不接受 `/phi/motion/teleop/whole_body` 或其它 teleop 话题。
 """
 
 import math
@@ -19,21 +16,14 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.time import Time
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Empty
-from std_srvs.srv import Trigger
-from pymbc_msgs.msg import WholeBodyData  # type: ignore
 
 REF_POSE_TOPIC = "/ref_pose"
-WHOLE_BODY_TOPIC = "/phi/motion/teleop/whole_body"
 ODOM_TOPIC = "/rko_lio/odometry"
-
-PUBLISH_HZ = 10.0
-DT_PUB = 1.0 / PUBLISH_HZ
 
 
 def yaw_to_quat(yaw):
@@ -49,18 +39,10 @@ def wrap_to_pi(a):
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
-class CSVRefPubSeq(Node):
+class RefPoseNavigateAction(Node):
     def __init__(self):
-        super().__init__("csv_ref_pub_seq")
+        super().__init__("ref_pose_navigate_action")
 
-        self.active = False
-
-        self.declare_parameter("teleop_timeout_sec", 2.0)
-        # 延迟日志：用 ROS 时钟比较 msg.stamp 与当前时间（勿与 time.monotonic 混用）
-        self.declare_parameter("log_teleop_delay", False)
-        self.declare_parameter("teleop_delay_log_period_sec", 1.0)
-        self._teleop_delay_log_last_mono = 0.0
-        # 默认与项目约定路径一致；若需 Nav2 默认名可改为 navigate_to_pose
         self.declare_parameter(
             "action_server_name", "/phi/motion/control/navigate_to_pose"
         )
@@ -69,20 +51,10 @@ class CSVRefPubSeq(Node):
         self.declare_parameter("action_pos_tolerance_m", 0.08)
         self.declare_parameter("action_yaw_tolerance_rad", math.radians(2.0))
 
-        self.last_msg: WholeBodyData | None = None
-        self.has_msg = False
-        self.last_rx_monotonic: float | None = None
-        self.create_subscription(WholeBodyData, WHOLE_BODY_TOPIC, self.cb_whole_body, 10)
-        self.get_logger().info(f"[ROS2] subscribe {WHOLE_BODY_TOPIC} -> /ref_pose")
-
         self.odom: Odometry | None = None
         self.create_subscription(Odometry, ODOM_TOPIC, self.cb_odom, 10)
 
         self.pub_pose = self.create_publisher(PoseStamped, REF_POSE_TOPIC, 10)
-        self.timer = self.create_timer(DT_PUB, self.on_timer)
-        self.reset_cli = self.create_client(Trigger, "/rko_lio/reset_odometry")
-
-        self.last_print_t = time.monotonic()
 
         self._action_running = False
         self._cb_group = ReentrantCallbackGroup()
@@ -97,9 +69,7 @@ class CSVRefPubSeq(Node):
             callback_group=self._cb_group,
         )
         self.get_logger().info(f"[ACTION] NavigateToPose server: {action_name}")
-
-        self.get_logger().info(f"[REF] publish_hz={PUBLISH_HZ}, topic={REF_POSE_TOPIC}")
-        self.get_logger().info("[REF] mode=ROS2 whole_body -> /ref_pose")
+        self.get_logger().info(f"[REF] topic={REF_POSE_TOPIC} (action-only, no teleop)")
 
     def cb_odom(self, msg: Odometry):
         self.odom = msg
@@ -211,106 +181,10 @@ class CSVRefPubSeq(Node):
         goal_handle.abort()
         return result
 
-    def cb_whole_body(self, msg: WholeBodyData):
-        """
-        WholeBodyData.command_type 映射见 `WholeBodyData.msg` 注释：
-          0: start
-          1: back_zero
-          2: together
-          3: body_ctl
-          4: reset
-          5: stop
-        """
-        cmd_type = int(msg.command_type)
-        self.last_rx_monotonic = time.monotonic()
-
-        if cmd_type in (0, 1, 2, 3):
-            self.active = True
-            self.last_msg = msg
-            self.has_msg = True
-            return
-
-        if cmd_type == 4:  # reset
-            self.active = False
-            self.get_logger().info("[CMD] reset -> call reset_odometry, active=False")
-            if self.reset_cli.service_is_ready():
-                self.reset_cli.call_async(Trigger.Request())
-            return
-
-        if cmd_type == 5:  # stop
-            self.active = False
-            self.get_logger().info("[CMD] stop -> active=False")
-            return
-
-        self.last_msg = msg
-        self.has_msg = True
-
-    def on_timer(self):
-        if self._action_running:
-            return
-        try:
-            if self.active is False:
-                return
-            if (not self.has_msg) or (self.last_msg is None):
-                return
-            timeout_sec = float(self.get_parameter("teleop_timeout_sec").value)
-            if timeout_sec > 0.0:
-                if self.last_rx_monotonic is None:
-                    return
-                age = time.monotonic() - self.last_rx_monotonic
-                if age > timeout_sec:
-                    self.active = False
-                    now_t = time.monotonic()
-                    if now_t - self.last_print_t > 2.0:
-                        self.last_print_t = now_t
-                        self.get_logger().warning(
-                            f"[ROS2->REF] teleop stale for {age:.2f}s (> {timeout_sec:.2f}s), set active=False"
-                        )
-                    return
-
-            x = float(self.last_msg.base_x)
-            y = float(self.last_msg.base_y)
-            yaw = float(self.last_msg.base_pitch)
-
-            if self.get_parameter("log_teleop_delay").value:
-                now_mono = time.monotonic()
-                period = float(self.get_parameter("teleop_delay_log_period_sec").value)
-                if now_mono - self._teleop_delay_log_last_mono >= max(period, 0.05):
-                    self._teleop_delay_log_last_mono = now_mono
-                    # 从“最近一次收到 whole_body”到本周期发布 ref 的本地耗时（受 timer 周期、负载影响）
-                    rx_lag = (
-                        0.0
-                        if self.last_rx_monotonic is None
-                        else (now_mono - self.last_rx_monotonic)
-                    )
-                    st = self.last_msg.stamp
-                    stamp_set = (int(st.sec) != 0) or (int(st.nanosec) != 0)
-                    if stamp_set:
-                        try:
-                            t_msg = Time.from_msg(st)
-                            t_now = self.get_clock().now()
-                            stamp_lag = (t_now - t_msg).nanoseconds * 1e-9
-                            self.get_logger().info(
-                                f"[TELEOP_DELAY] stamp->now={1000.0 * stamp_lag:.1f} ms | "
-                                f"last_rx->publish(mono)={1000.0 * rx_lag:.1f} ms"
-                            )
-                        except Exception as e:
-                            self.get_logger().debug(f"[TELEOP_DELAY] stamp calc failed: {e}")
-                    else:
-                        self.get_logger().info(
-                            f"[TELEOP_DELAY] msg.stamp is zero; "
-                            f"last_rx->publish(mono)={1000.0 * rx_lag:.1f} ms only"
-                        )
-
-            self.publish_ref_pose(x, y, yaw)
-            self.get_logger().info(f"[ROS2->REF] x={x:+.4f} y={y:+.4f} yaw={yaw:+.4f}")
-        except Exception as e:
-            self.get_logger().warning(f"[ROS2] error: {e}")
-
 
 def main():
     rclpy.init()
-    node = CSVRefPubSeq()
+    node = RefPoseNavigateAction()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:

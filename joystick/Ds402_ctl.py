@@ -169,13 +169,13 @@ class PdoMapConfig:
     target_position_name: str = "Target position"
 
     # TPDO 上行节奏 (trans_type 254/255 异步时): 05=event_timer[ms], 03=inhibit[100µs]
-    # 5ms 周期 + 5ms 最小间隔 → 名义约 200Hz，并限制“变化触发”连发（见 CiA301 / MDX+ 手册）
-    tpdo_event_timer_ms: int = 5
-    tpdo_inhibit_time_100us: int = 50
+    # 50ms 周期 + 50ms 最小间隔 → 名义约 20Hz
+    tpdo_event_timer_ms: int = 50
+    tpdo_inhibit_time_100us: int = 500
 
     # 主站 SYNC + 命令侧 RPDO 同步 (CiA301: RxPDO 0~240 在 SYNC 时把缓冲写入应用)
-    # 与 TPDO 200Hz 对齐：5ms 一拍，三轴在同一 SYNC 边沿生效
-    sync_period_s: float = 0.1
+    # 20Hz，与较低 TPDO 负载同量级（仍须按驱动器手册核对）
+    sync_period_s: float = 0.05
     rpdo_vel_trans_type: int = 1
     rpdo_pos_trans_type: int = 1
 
@@ -684,7 +684,7 @@ class Ds402Motor(Motor):
         except Exception:
             pass
 
-        # TPDO 上行限速 (~200Hz): event_timer + inhibit_time 与手册 1800:05 / 1800:03 对应
+        # TPDO 上行限速: event_timer + inhibit_time 与手册 1800:05 / 1800:03 对应（频率见 PDO_MAP）
         try:
             cfg = self.io.cfg
             self.io.configure_tpdo_limit_rate(

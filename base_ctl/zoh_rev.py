@@ -27,25 +27,25 @@ REF_TWIST_TOPIC = "/ref_twist"
 CMD_TOPIC  = "/cmd_vel"
 
 LOG_CSV = "/opt/project/robot_base_ctl/data_20251219_201132_100/data_20251219_201132_100/violin.csv"
-LOG_DECIM = 4     # 每10个控制周期记录1次；200Hz/10=20Hz
+LOG_DECIM = 4     # 每 4 个控制周期记 1 次；200Hz/4 ≈ 50Hz 写 CSV
 LOG_FLUSH_EVERY = 200  # 每写200行flush一次
 
-CONTROL_HZ = 200.0
+CONTROL_HZ = 20.0
 DT_CTRL = 1.0 / CONTROL_HZ
 
-KP_POS = 1.2
+KP_POS = 1.0
 KI_POS = 0.0
 I_LIM  = 0.30
 
-KP_YAW = 1.3
-W_MAX  = 1.0
+KP_YAW = 0.8
+W_MAX  = 0.25
 
 V_FRONT_MAX = 0.1
 V_LEFT_MAX  = 0.1
 
-A_FRONT_MAX = 1.1
-A_LEFT_MAX  = 1.1
-A_W_MAX     = 2.5
+A_FRONT_MAX = 1.0
+A_LEFT_MAX  = 1.0
+A_W_MAX     = 2.2
 
 def clamp(x, lo, hi): return max(lo, min(hi, x))
 def wrap_to_pi(a): return (a + math.pi) % (2*math.pi) - math.pi
@@ -238,9 +238,9 @@ class Assist(Node):
         vl = clamp(vl, -V_LEFT_MAX,  V_LEFT_MAX)
         wz = clamp(wz, -W_MAX,       W_MAX)
 
-        #vf = self._slew(vf, self.last_vf, A_FRONT_MAX, dt)
-        #vl = self._slew(vl, self.last_vl, A_LEFT_MAX,  dt)
-        #wz = self._slew(wz, self.last_wz, A_W_MAX,      dt)
+        vf = self._slew(vf, self.last_vf, A_FRONT_MAX, dt)
+        vl = self._slew(vl, self.last_vl, A_LEFT_MAX,  dt)
+        wz = self._slew(wz, self.last_wz, A_W_MAX,      dt)
 
         self.last_vf, self.last_vl, self.last_wz = vf, vl, wz
 

@@ -8,7 +8,8 @@ class LiftConfig:
     bitrate: int = 1000000
     node_id: int = 4
 
-    # TPDO2 position + RPDO2 command
+    # TPDO1 status word 0x6041；TPDO2 position 0x6064（与驱动 PDO 映射一致）
+    status_tpdo_index: int = 1
     position_tpdo_index: int = 2
     cmd_rpdo_index: int = 2
 
@@ -19,6 +20,10 @@ class LiftConfig:
     pp_wait_timeout: float = 120.0
     # Communication period (ms) for PDO / control loops (informational)
     comm_period_ms: float = 10.0
+    
+    # TPDO feedback frequency configuration (Hz)
+    # This configures the TPDO event timer to achieve the desired feedback rate
+    feedback_frequency_hz: int = 100
 
     # Position-based completion detection
     position_tolerance_pulse: int = 2000
@@ -33,9 +38,9 @@ class LiftConfig:
     mm_per_1m_pulse: float = 34.25
 
     # PP motion params
-    profile_velocity: int = 600000
-    profile_acceleration: int = 3000000
-    profile_deceleration: int = 3000000
+    profile_velocity: int = 400000
+    profile_acceleration: int = 2000000
+    profile_deceleration: int = 2000000
 
     @property
     def pulse_per_mm(self) -> float:

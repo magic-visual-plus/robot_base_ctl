@@ -1,0 +1,37 @@
+# mode=INCREMENTAL/MASTER_SLAVE_MIRROR 时必填：双臂法兰基准（米、四元数 wxyz）；
+# 后续 body_ctl 在该基准上叠加 topic xyz 差分积分。mode=ABSOLUTE 时忽略下列字段。
+#
+# 模式说明（三选一）：
+#   ABSOLUTE(0)            ：body_ctl 直接用 topic 全量位姿（xyz+wxyz）做 IK，不积分。
+#   INCREMENTAL(1)         ：双臂独立增量。
+#                            左臂目标 = preset_l + Σ(lp_t - lp_{t-1})
+#                            右臂目标 = preset_r + Σ(rp_t - rp_{t-1})
+#                            姿态各自锁死为 preset_l/r 四元数；topic 上的四元数被忽略。
+#   MASTER_SLAVE_MIRROR(2) ：主从臂镜像增量，**增量数据全部来自 right 臂 topic xyz**。
+#                            令 dr_t = rp_t - rp_{t-1}：
+#                              右臂目标 = preset_r + Σ dr_t
+#                              左臂目标 = preset_l + Σ ([-1, +1, +1] · dr_t)
+#                            即 x 轴增量取反，y/z 轴增量同向；姿态分别锁死为
+#                            preset_l/r 四元数；topic 上 left_*/四元数 字段不参与计算。
+uint8 ABSOLUTE=0
+uint8 INCREMENTAL=1
+uint8 MASTER_SLAVE_MIRROR=2
+uint8 mode
+float64 preset_l_x
+float64 preset_l_y
+float64 preset_l_z
+float64 preset_l_qw
+float64 preset_l_qx
+float64 preset_l_qy
+float64 preset_l_qz
+float64 preset_r_x
+float64 preset_r_y
+float64 preset_r_z
+float64 preset_r_qw
+float64 preset_r_qx
+float64 preset_r_qy
+float64 preset_r_qz
+---
+bool success
+string message
+uint8 current_mode

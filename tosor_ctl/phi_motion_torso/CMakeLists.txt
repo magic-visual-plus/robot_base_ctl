@@ -21,6 +21,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/Initialize.srv"
   "srv/GetMotionParams.srv"
   "srv/SetMotionParams.srv"
+  "srv/GetControlMode.srv"
+  "srv/SetControlMode.srv"
   DEPENDENCIES std_msgs action_msgs builtin_interfaces
 )
 

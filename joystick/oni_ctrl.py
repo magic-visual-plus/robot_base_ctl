@@ -79,7 +79,7 @@ class LeKiwiBaseConfig:
     # safety limits (output-shaft wheel angular speed limit, rad/s)
     max_wheel_rad_s: float = 2.0 * math.pi  # default 1 rev/s
 
-    # Master SYNC (s); None -> use PDO_MAP.sync_period_s (default 5ms with RPDO sync)
+    # Master SYNC (s); None -> use PDO_MAP.sync_period_s
     sync_period_s: Optional[float] = None
     auto_sync: bool = True
 
@@ -88,8 +88,8 @@ class LeKiwiBaseConfig:
 
     # 三台轮电机统一动态（MDX+ 手册 0x6083 规划加速度、0x6084 规划减速度，UNSIGNED32，单位 Pulses/s^2）
     apply_uniform_profile_dynamics: bool = True
-    base_profile_accel_pulses_s2: int = 3_600_000
-    base_profile_decel_pulses_s2: int = 3_600_000
+    base_profile_accel_pulses_s2: int = 20_000
+    base_profile_decel_pulses_s2: int = 20_000
 
     # wheel direction multipliers (if some wheel is reversed, set -1)
     dir_left: int = +1
@@ -114,6 +114,7 @@ class LeKiwiBaseController:
     Public API:
       - set_body_velocity(x[m/s], y[m/s], theta[deg/s])
       - read_body_velocity() -> {'x.vel','y.vel','theta.vel'} (theta in deg/s)
+      - newest_wheel_feedback_cache_ts() -> 各轮 TPDO 写入 cache 的最新时间戳
       - stop()
       - read_wheel_positions_counts()
       - read_wheel_positions_rad()
@@ -159,6 +160,19 @@ class LeKiwiBaseController:
                 len(self._motor_diag_profile.entries),
                 _diag_path,
             )
+
+        self._body_to_wheel_m: np.ndarray
+        self._wheel_to_body_m: np.ndarray
+        self._rebuild_kinematic_matrices()
+
+    def _rebuild_kinematic_matrices(self) -> None:
+        r = float(self.config.wheel_radius)
+        br = float(self.config.base_radius)
+        angles = np.radians(np.array([240.0, 0.0, 120.0], dtype=np.float64) - 90.0)
+        kin_m = np.array([[np.cos(a), np.sin(a), br] for a in angles], dtype=np.float64)
+        inv_kin = np.linalg.inv(kin_m)
+        self._body_to_wheel_m = kin_m / r
+        self._wheel_to_body_m = inv_kin * r
 
     def _validate_active_nodes(self) -> None:
         allowed = {self.NODE_LEFT, self.NODE_BACK, self.NODE_RIGHT}
@@ -372,6 +386,19 @@ class LeKiwiBaseController:
                     name, nid, sw, st, line,
                 )
 
+    def newest_wheel_feedback_cache_ts(self) -> float:
+        """各主动轮 TPDO 反馈在 bus.cache 里的最新 ``time.time()`` 时间戳（无则为 0）。"""
+        if not self.is_connected:
+            return 0.0
+        ts_max = 0.0
+        for nid in self._ordered_active_nodes():
+            c = self._bus.cache.get(nid)
+            if c is None:
+                continue
+            if c.ts > ts_max:
+                ts_max = c.ts
+        return float(ts_max)
+
     def read_body_velocity(self) -> Dict[str, float]:
         """Read wheel velocities and convert back to body-frame velocity."""
         if not self.is_connected:
@@ -546,20 +573,12 @@ class LeKiwiBaseController:
         Convert body velocity to wheel angular velocities (rad/s).
         """
         theta_rad_s = math.radians(theta_deg_s)
-        velocity_vector = np.array([x, y, theta_rad_s], dtype=float)
+        velocity_vector = np.array([x, y, theta_rad_s], dtype=np.float64)
+        wheel_angular_speeds = self._body_to_wheel_m.dot(velocity_vector)
 
-        # same wheel order as your original code: left, back, right
-        angles = np.radians(np.array([240, 0, 120]) - 90.0)
-        m = np.array([[np.cos(a), np.sin(a), self.config.base_radius] for a in angles], dtype=float)
-
-        wheel_linear_speeds = m.dot(velocity_vector)                    # [m/s] along wheel rolling directions
-        wheel_angular_speeds = wheel_linear_speeds / self.config.wheel_radius  # [rad/s]
-
-        # limit / scale
         max_w = float(np.max(np.abs(wheel_angular_speeds)))
         if self.config.max_wheel_rad_s > 0 and max_w > self.config.max_wheel_rad_s:
-            scale = self.config.max_wheel_rad_s / max_w
-            wheel_angular_speeds = wheel_angular_speeds * scale
+            wheel_angular_speeds = wheel_angular_speeds * (self.config.max_wheel_rad_s / max_w)
 
         return {
             "base_left_wheel": float(wheel_angular_speeds[0]),
@@ -572,14 +591,8 @@ class LeKiwiBaseController:
         Convert wheel angular speeds (rad/s) to body velocity.
         Returns theta in deg/s (consistent with your original API).
         """
-        wheel_radps = np.array([left_w, back_w, right_w], dtype=float)
-        wheel_linear_speeds = wheel_radps * self.config.wheel_radius     # [m/s]
-
-        angles = np.radians(np.array([240, 0, 120]) - 90.0)
-        m = np.array([[np.cos(a), np.sin(a), self.config.base_radius] for a in angles], dtype=float)
-        m_inv = np.linalg.inv(m)
-
-        velocity_vector = m_inv.dot(wheel_linear_speeds)  # [vx, vy, wz(rad/s)]
+        wheel_radps = np.array([left_w, back_w, right_w], dtype=np.float64)
+        velocity_vector = self._wheel_to_body_m.dot(wheel_radps)
         x, y, theta_rad_s = velocity_vector
         theta_deg_s = math.degrees(theta_rad_s)
         return {"x.vel": float(x), "y.vel": float(y), "theta.vel": float(theta_deg_s)}

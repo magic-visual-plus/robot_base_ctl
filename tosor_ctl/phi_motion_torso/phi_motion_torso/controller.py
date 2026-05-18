@@ -24,13 +24,16 @@ from data_model.lift_config import LiftConfig  # noqa: E402
 
 
 class SharedState:
-    """Thread-safe state container for position feedback"""
+    """Thread-safe state container for position + CiA402 statusword feedback"""
 
     def __init__(self):
         self._lock = threading.Lock()
         self.position: Optional[int] = None
         self.recv_position_count = 0
         self.last_position_ts: Optional[float] = None
+        self.status_word: Optional[int] = None
+        self.recv_status_word_count = 0
+        self.last_status_word_ts: Optional[float] = None
         self.running = True
 
     def update_position(self, position: int) -> None:
@@ -39,12 +42,21 @@ class SharedState:
             self.recv_position_count += 1
             self.last_position_ts = time.time()
 
+    def update_status_word(self, word: int) -> None:
+        with self._lock:
+            self.status_word = int(word) & 0xFFFF
+            self.recv_status_word_count += 1
+            self.last_status_word_ts = time.time()
+
     def snapshot(self) -> dict:
         with self._lock:
             return {
                 "position": self.position,
                 "recv_position_count": self.recv_position_count,
                 "last_position_ts": self.last_position_ts,
+                "status_word": self.status_word,
+                "recv_status_word_count": self.recv_status_word_count,
+                "last_status_word_ts": self.last_status_word_ts,
                 "running": self.running,
             }
 
@@ -68,6 +80,7 @@ class LiftColumnController:
         self.node: Optional[canopen.BaseNode402] = None
 
         self.tpdo_position = None
+        self.tpdo_status = None
         self.rpdo_cmd = None
 
         self.state = SharedState()
@@ -158,6 +171,7 @@ class LiftColumnController:
         self._load_configuration()
         self._read_pdo_configuration()
         self._disable_unused_tpdos()
+        self._configure_tpdo_frequency()
         self._setup_state_machine()
         self._enter_operational()
         self._register_pdo_callbacks()
@@ -180,6 +194,20 @@ class LiftColumnController:
 
         self.tpdo_position = self.node.tpdo[self.cfg.position_tpdo_index]
         self.rpdo_cmd = self.node.rpdo[self.cfg.cmd_rpdo_index]
+
+        st_idx = int(self.cfg.status_tpdo_index)
+        if st_idx in self.node.tpdo:
+            self.tpdo_status = self.node.tpdo[st_idx]
+            logger.info(
+                "TPDO status index=%d COB-ID=0x%08X (expect 0x6041)",
+                st_idx,
+                self.tpdo_status.cob_id,
+            )
+        else:
+            logger.warning(
+                "TPDO index %d not present — statusword via SDO fallback only",
+                st_idx,
+            )
 
         logger.info(
             "TPDO position index=%d COB-ID=0x%08X",
@@ -204,6 +232,51 @@ class LiftColumnController:
                     logger.info("Disabled TPDO4 (velocity/extra feedback) to reduce CAN traffic")
         except Exception as exc:
             logger.warning("Failed to disable TPDO4: %s", exc)
+
+    def _configure_tpdo_frequency(self) -> None:
+        """
+        Configure TPDO event timer to achieve the desired feedback frequency.
+        The event timer controls how often TPDOs are transmitted.
+        """
+        assert self.node is not None
+        try:
+            # Calculate event timer in ms based on desired frequency
+            # TPDO event timer resolution is 1ms
+            event_timer_ms = int(round(1000.0 / self.cfg.feedback_frequency_hz))
+            
+            # Configure the position TPDO
+            tpdo = self.node.tpdo[self.cfg.position_tpdo_index]
+            tpdo.event_timer = event_timer_ms
+            # Set inhibit time to prevent excessive TPDO transmission
+            tpdo.inhibit_time = int(round(event_timer_ms * 10))  # 100us units
+            
+            # Set transmission type to 255 (event-driven with timer)
+            tpdo.trans_type = 255
+            tpdo.enabled = True
+            tpdo.save()
+            
+            logger.info("TPDO%d configured for %d Hz feedback (event_timer=%d ms)",
+                        self.cfg.position_tpdo_index, self.cfg.feedback_frequency_hz, event_timer_ms)
+
+            # TPDO1（状态字）与位置 PDO 分离时，同步事件周期便于 topic 对齐
+            if (
+                self.tpdo_status is not None
+                and self.tpdo_status is not self.tpdo_position
+            ):
+                stp = self.tpdo_status
+                stp.event_timer = event_timer_ms
+                stp.inhibit_time = int(round(event_timer_ms * 10))
+                stp.trans_type = 255
+                stp.enabled = True
+                stp.save()
+                logger.info(
+                    "TPDO%d (status) event_timer=%d ms @ ~%d Hz",
+                    int(self.cfg.status_tpdo_index),
+                    event_timer_ms,
+                    self.cfg.feedback_frequency_hz,
+                )
+        except Exception as exc:
+            logger.warning("Failed to configure TPDO frequency: %s", exc)
 
     def _setup_state_machine(self) -> None:
         assert self.node is not None
@@ -231,6 +304,21 @@ class LiftColumnController:
                 logger.warning("Parse position TPDO2 failed: %s", exc)
 
         self.tpdo_position.add_callback(on_position_tpdo)
+
+        if self.tpdo_status is not None:
+
+            def on_status_tpdo(_):
+                try:
+                    sw = int(self.tpdo_status[0x6041].raw)
+                    self.state.update_status_word(sw)
+                except Exception as exc:
+                    logger.warning("Parse status TPDO (0x6041) failed: %s", exc)
+
+            self.tpdo_status.add_callback(on_status_tpdo)
+            logger.info(
+                "Registered statusword callback on TPDO%d",
+                int(self.cfg.status_tpdo_index),
+            )
 
     def _enable_drive(self) -> None:
         assert self.node is not None
@@ -342,10 +430,29 @@ class LiftColumnController:
         return self.pulse_to_height_mm(self.get_current_position())
 
     def get_status_snapshot(self) -> dict:
-        """Get complete status snapshot"""
+        """Get complete status snapshot (statusword: PDO cache or SDO fallback)."""
         snap = self.state.snapshot()
         pos = snap["position"]
         snap["height_mm"] = None if pos is None else self.pulse_to_height_mm(pos)
+
+        sw = snap.get("status_word")
+        snap["status_word_sdo"] = False
+        if sw is None and self.node is not None:
+            try:
+                sw = int(self.node.sdo[0x6041].raw) & 0xFFFF
+                snap["status_word"] = sw
+                snap["status_word_valid"] = True
+                snap["status_word_sdo"] = True
+            except Exception:
+                snap["status_word"] = 0
+                snap["status_word_valid"] = False
+        else:
+            if sw is not None:
+                snap["status_word"] = int(sw) & 0xFFFF
+                snap["status_word_valid"] = True
+            else:
+                snap["status_word"] = 0
+                snap["status_word_valid"] = False
         return snap
 
     # -------------------------------------------------------------------------

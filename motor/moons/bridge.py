@@ -44,8 +44,8 @@ class LeKiwiBaseBridge(Node):
         self.declare_parameter("dir_right", 1)
         self.declare_parameter("base_velocity_mode", "PV")
         self.declare_parameter("apply_uniform_profile_dynamics", True)
-        self.declare_parameter("base_profile_accel_pulses_s2", 3_600_000)
-        self.declare_parameter("base_profile_decel_pulses_s2", 3_600_000)
+        self.declare_parameter("base_profile_accel_pulses_s2", 600_000)
+        self.declare_parameter("base_profile_decel_pulses_s2", 600_000)
         self.declare_parameter("motor_diagnostics_profile", "tongchuan_mdx")
 
         cfg = LeKiwiBaseConfig(
@@ -71,10 +71,13 @@ class LeKiwiBaseBridge(Node):
 
         self.sub = self.create_subscription(Twist, cmd_topic, self.cb_cmd, 10)
         self.pub_fb = self.create_publisher(TwistStamped, "/base_vel_fb", 10)
-        self.fb_timer = self.create_timer(0.02, self.publish_fb)
+        # 与 zoh_rev / TPDO 对齐：20 Hz；无新 TPDO 时在 publish_fb 内跳过重复发布
+        self.fb_timer = self.create_timer(0.05, self.publish_fb)
 
         self.last_cmd_time = self.get_clock().now()
         self.timeout_sec = 0.5
+        self._watchdog_zero_sent = False
+        self._last_fb_cache_ts = 0.0
         self.timer = self.create_timer(0.05, self.watchdog)
 
         self.get_logger().info(
@@ -88,6 +91,7 @@ class LeKiwiBaseBridge(Node):
 
     def cb_cmd(self, msg: Twist):
         self.last_cmd_time = self.get_clock().now()
+        self._watchdog_zero_sent = False
         vx = self._clamp(msg.linear.x, -self.vx_max, self.vx_max)
         vy = self._clamp(msg.linear.y, -self.vy_max, self.vy_max)
         wz = self._clamp(msg.angular.z, -self.wz_max, self.wz_max)
@@ -96,13 +100,20 @@ class LeKiwiBaseBridge(Node):
 
     def watchdog(self):
         dt = (self.get_clock().now() - self.last_cmd_time).nanoseconds * 1e-9
-        if dt > self.timeout_sec:
+        if dt > self.timeout_sec and not self._watchdog_zero_sent:
             self.base.set_body_velocity(0.0, 0.0, 0.0)
+            self._watchdog_zero_sent = True
 
     def publish_fb(self):
         if not self.base.is_connected:
             return
         try:
+            newest_ts = self.base.newest_wheel_feedback_cache_ts()
+            if newest_ts > 0.0 and newest_ts <= self._last_fb_cache_ts:
+                return
+            if newest_ts > 0.0:
+                self._last_fb_cache_ts = newest_ts
+
             v = self.base.read_body_velocity()
             vx = float(v.get("x.vel", 0.0))
             vy = float(v.get("y.vel", 0.0))

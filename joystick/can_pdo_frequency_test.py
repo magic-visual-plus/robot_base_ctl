@@ -37,11 +37,12 @@ CANopen PDO / SYNC 频率测试（基于本目录 Ds402_ctl.py）
 
 说明
 ----
-- Ds402_ctl.CanopenBus.connect() 默认 ``net.sync.start(PDO_MAP.sync_period_s)``（现默认 5ms
-  ≈200Hz），由本 Network 在 CAN 上发 SYNC。这与「应用层多少次调用 set_target_velocity」
-  无直接关系；RxPDO 是否在 SYNC 边沿进应用取决于从站 RPDO transmission type（init 里
-  已把速度/位置 RPDO 配成同步型）与厂家实现。
-- TPDO event_timer + inhibit（init 里约 5ms）影响从站**上行**节奏；本脚本统计的是
+- Ds402_ctl.CanopenBus.connect() 默认 ``net.sync.start(PDO_MAP.sync_period_s)``，由本 Network
+  在 CAN 上发 SYNC。这与「应用层多少次调用 set_target_velocity」无直接关系；RxPDO 是否在
+  SYNC 边沿进应用取决于从站 RPDO transmission type（init 里已把速度/位置 RPDO 配成同步型）
+  与厂家实现。
+- TPDO event_timer + inhibit（见 ``PDO_MAP``，当前默认约 20Hz 上行）影响从站**上行**节奏；
+  本脚本统计的是
   python-canopen 解析 TPDO 后触发回调的次数，应与 candump 中对应 TPDO 频率一致
   （在总线不丢帧时）。
 

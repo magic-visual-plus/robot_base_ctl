@@ -268,7 +268,7 @@ def parse_args():
     parser.add_argument(
         "--mode",
         choices=["base", "torso", "both"],
-        default="base",
+        default="both",
         help="control target: base, torso, or both",
     )
     parser.add_argument(
@@ -290,14 +290,14 @@ def parse_args():
         type=int,
         default=600_000,
         metavar="PULSES_S2",
-        help="CiA402 0x6083 planning accel (Pulses/s^2), applied to all three base nodes. Default 3600000.",
+        help="CiA402 0x6083 planning accel (Pulses/s^2), applied to all three base nodes. Default 600000.",
     )
     parser.add_argument(
         "--base-profile-decel",
         type=int,
         default=600_000,
         metavar="PULSES_S2",
-        help="CiA402 0x6084 planning decel (Pulses/s^2), applied to all three base nodes. Default 3600000.",
+        help="CiA402 0x6084 planning decel (Pulses/s^2), applied to all three base nodes. Default 600000.",
     )
     parser.add_argument(
         "--motor-diag-debug",

@@ -1,0 +1,164 @@
+# 513 工位流程 —— 仅改此文件即可调试坐标 / 高度 / IK，无需改代码。
+# 依赖：PyYAML、rclpy、evdev、nav2_msgs、phi_motion_torso、pymbc_msgs（IK 服务）
+
+version: 1
+cooldown_sec: 1.5
+
+ros:
+  navigate_action: "/phi/motion/control/navigate_to_pose"
+  torso_action: "/phi/motion/torso/move_to_height"
+  ik_service: "/phi/motion/teleop/set_whole_body_ik_cartesian_mode"
+
+# 过渡：取料→挂料先 navigate 到唯一过渡点，再跑挂料 sequence；回程可逆序
+transitions:
+  pickup_to_hang:
+    enabled: true
+    reverse_for_hang_to_pickup: true
+    by_hang_zone:
+      hang_1: &pickup_hang_transition
+        steps:
+          - kind: navigate
+            goal:
+              frame_id: "map"
+              position:
+                x: -0.6868786170912759
+                y: 0.15630933891131255
+                z: 0.06255399041840964
+              orientation:
+                x: 0.063319349273955
+                y: -0.008472314701002568
+                z: 0.8663054568809949
+                w: 0.4954126918734933
+      hang_2: *pickup_hang_transition
+      hang_3: *pickup_hang_transition
+      hang_4: *pickup_hang_transition
+
+# 可选：Modifier 键码（默认同 ecodes.BTN_TR）；取料副键码见 pickup.combo.key_codes
+joystick:
+  modifier_tr_codes: [] # 空则使用 ecodes.BTN_TR
+
+zones:
+  pickup:
+    label: "取料"
+    group: "pickup"
+    combo:
+      type: tr_and_key_edge
+      # 文档示例 BTN_WEST|BTN_Y code=308
+      key_codes: [308]
+    sequence:
+      base_goals:
+        - frame_id: "map"
+          position:
+            x: 0.0011877184874843198
+            y: -0.0007203205116685922
+            z: -0.010935704495222007
+          orientation:
+            x: -0.0010131258974350743
+            y: -0.00038694946605522646
+            z: -3.309663881818659e-05
+            w: 0.9999994113751464
+      torso_height_mm: 629.9957
+      ik_preset:
+        mode: 0
+        preset_l_x: 0.0
+        preset_l_y: 0.0
+        preset_l_z: 0.0
+        preset_l_qw: 1.0
+        preset_l_qx: 0.0
+        preset_l_qy: 0.0
+        preset_l_qz: 0.0
+        preset_r_x: 0.0
+        preset_r_y: 0.0
+        preset_r_z: 0.0
+        preset_r_qw: 1.0
+        preset_r_qx: 0.0
+        preset_r_qy: 0.0
+        preset_r_qz: 0.0
+
+  hang_1:
+    label: "挂料工位"
+    group: "hang"
+    combo:
+      type: tr_and_hat_edge
+      axis: HAT0X
+      value: -1
+    sequence:
+      base_goals:
+        # 挂料工位；hang_2~4 通过 *hang_goal 引用与 hang_1 相同的位姿
+        - frame_id: "map"
+          position:
+            x: -1.3540840174678226
+            y: 1.2361319669354187
+            z: 0.09135784731527065
+          orientation:
+            x: 0.05247403498847352
+            y: -0.003245535236843952
+            z: 0.8785915095679324
+            w: 0.474671361542064
+      torso_height_mm: 629.9957
+      # 四方挂料共用：MASTER_SLAVE_MIRROR(2)，见 513_work_flow.md 挂料区1
+      ik_preset: &hang_ik
+        mode: 2
+        preset_l_x: 0.0
+        preset_l_y: -0.5162
+        preset_l_z: 0.41134
+        preset_l_qw: -0.5
+        preset_l_qx: -0.5
+        preset_l_qy: -0.5
+        preset_l_qz: 0.5
+        preset_r_x: 0.0
+        preset_r_y: -0.5162
+        preset_r_z: 0.41134
+        preset_r_qw: 0.5
+        preset_r_qx: 0.5
+        preset_r_qy: -0.5
+        preset_r_qz: 0.5
+
+  hang_2:
+    label: "挂料工位"
+    group: "hang"
+    combo:
+      type: tr_and_hat_edge
+      axis: HAT0Y
+      value: 1
+    sequence:
+      base_goals:
+        - &hang_goal
+          frame_id: "map"
+          position:
+            x: -1.3540840174678226
+            y: 1.2361319669354187
+            z: 0.09135784731527065
+          orientation:
+            x: 0.05247403498847352
+            y: -0.003245535236843952
+            z: 0.8785915095679324
+            w: 0.474671361542064
+      torso_height_mm: 629.9957
+      ik_preset: *hang_ik
+
+  hang_3:
+    label: "挂料工位"
+    group: "hang"
+    combo:
+      type: tr_and_hat_edge
+      axis: HAT0X
+      value: 1
+    sequence:
+      base_goals:
+        - *hang_goal
+      torso_height_mm: 629.9957
+      ik_preset: *hang_ik
+
+  hang_4:
+    label: "挂料工位"
+    group: "hang"
+    combo:
+      type: tr_and_hat_edge
+      axis: HAT0Y
+      value: -1
+    sequence:
+      base_goals:
+        - *hang_goal
+      torso_height_mm: 629.9957
+      ik_preset: *hang_ik

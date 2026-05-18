@@ -1,0 +1,10 @@
+# Control mode values:
+# 0 - TELEOP: Teleoperation mode
+# 1 - MBC: Action-based control mode
+# 2 - JOYSTICK: Joystick incremental control mode
+int32 mode
+---
+bool success
+string message
+int32 current_mode
+string current_mode_name
